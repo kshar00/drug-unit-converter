@@ -138,3 +138,15 @@ def test_resolve_ambiguous_ten_digit(db):
 def test_missing_db_has_helpful_error(tmp_path):
     with pytest.raises(FileNotFoundError, match="data.refresh"):
         ReferenceStore(tmp_path / "nope.duckdb")
+
+
+def test_search_products(db):
+    with ReferenceStore(db) as ref:
+        hits = ref.search_products("testu")
+        assert [h["ndc11"] for h in hits] == ["11111000101"]
+        assert hits[0]["hcpcs"] == "J8888, J9999" and hits[0]["proprietary_name"] == "Testumab"
+        assert [h["ndc11"] for h in ref.search_products("j9999")] == ["11111000101"]  # by HCPCS code
+        assert ref.search_products("pill")[0]["hcpcs"] is None  # found, but not in the crosswalk
+        assert ref.search_products("oldrug")[0]["source"] == "excluded"
+        assert ref.search_products("ab") == []  # too short
+        assert ref.search_products("nothing like this") == []

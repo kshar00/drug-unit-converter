@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -107,6 +108,46 @@ class ReferenceStore:
             if prod:
                 pkg.update(prod[0])
         return pkg
+
+    def search_products(self, query: str, limit: int = 50) -> list[dict]:
+        """Find packages by brand / generic / ingredient name, or by HCPCS code (e.g. 'J9271').
+
+        Packages in the CMS crosswalk (convertible to HCPCS) come first, then active FDA listings,
+        then delisted ones. Each row has ndc11, the product names, strength, dosage form, package
+        description, source and `hcpcs` (crosswalk codes, comma-separated, or None).
+        """
+        q = (query or "").strip()
+        if len(q) < 3 or "fda_package" not in self._tables or "fda_product" not in self._tables:
+            return []
+        has_xw = "asp_crosswalk" in self._tables
+        xw_join = (
+            "LEFT JOIN (SELECT ndc11, string_agg(DISTINCT hcpcs, ', ' ORDER BY hcpcs) AS hcpcs "
+            "FROM asp_crosswalk GROUP BY ndc11) x USING (ndc11)"
+            if has_xw else ""
+        )
+        hcpcs_col = "x.hcpcs" if has_xw else "NULL"
+        if has_xw and re.fullmatch(r"[A-Za-z]\d{4}", q):
+            where, params = "pk.ndc11 IN (SELECT ndc11 FROM asp_crosswalk WHERE hcpcs = ?)", [q.upper()]
+            starts = "FALSE"
+        else:
+            like = f"%{q}%"
+            where = "(pr.proprietary_name ILIKE ? OR pr.nonproprietary_name ILIKE ? OR pr.substance_name ILIKE ?)"
+            params = [like, like, like]
+            starts = "(pr.proprietary_name ILIKE ? OR pr.nonproprietary_name ILIKE ?)"
+            params += [f"{q}%", f"{q}%"]
+        return self._rows(
+            f"""
+            SELECT pk.ndc11, pr.proprietary_name, pr.nonproprietary_name, pr.strength, pr.strength_unit,
+                   pr.dosage_form, pk.package_description, pk.source, {hcpcs_col} AS hcpcs
+            FROM fda_package pk
+            JOIN fda_product pr USING (product_id)
+            {xw_join}
+            WHERE pk.ndc11 IS NOT NULL AND {where}
+            ORDER BY NOT {starts}, {hcpcs_col} IS NULL, pk.source = 'excluded', pr.proprietary_name, pk.ndc11
+            LIMIT {int(limit)}
+            """,
+            params,
+        )
 
     def crosswalk(self, ndc11: str) -> list[dict]:
         if "asp_crosswalk" not in self._tables:

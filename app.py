@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tempfile
 import threading
 from dataclasses import replace
@@ -330,9 +331,67 @@ def load_example():
         st.session_state[f"f_{k}"] = ex.get(k, default)
 
 
+@st.cache_data(max_entries=256, show_spinner=False)
+def search_products(query: str) -> list[dict]:
+    with lock:
+        return store.search_products(query, limit=50)
+
+
+def _package_short(desc: str | None) -> str:
+    text = re.sub(r"\(\s*\d[\d-]*\s*\)", "", desc or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= 70 else text[:67] + "…"
+
+
+def product_label(row: dict) -> str:
+    name = row.get("proprietary_name") or row.get("nonproprietary_name") or "?"
+    generic = row.get("nonproprietary_name")
+    if generic and generic.lower() != str(name).lower():
+        name = f"{name} ({generic})"
+    strength = f"{row['strength']} {row['strength_unit']}" if row.get("strength") and row.get("strength_unit") else ""
+    n = row["ndc11"]
+    parts = [f"{name} {strength}".strip(), _package_short(row.get("package_description")),
+             f"NDC {n[:5]}-{n[5:9]}-{n[9:]}", row.get("hcpcs") or "no HCPCS crosswalk"]
+    label = " · ".join(p for p in parts if p)
+    return label + (" · delisted" if row.get("source") == "excluded" else "")
+
+
+def use_product(rows: list[dict]) -> None:
+    i = st.session_state.get("product_pick")
+    if i is None:
+        return
+    row = rows[i]
+    n = row["ndc11"]
+    st.session_state["f_ndc"] = f"{n[:5]}-{n[5:9]}-{n[9:]}"
+    codes = [c.strip() for c in (row.get("hcpcs") or "").split(",") if c.strip()]
+    st.session_state["f_hcpcs"] = codes[0] if len(codes) == 1 else ""
+
+
 with tab_one:
-    top_l, _ = st.columns([2, 3])
-    top_l.selectbox("Load an example", list(EXAMPLES), key="example", on_change=load_example)
+    find_col, demo_col = st.columns([3, 2])
+    query = find_col.text_input(
+        "Find a product (optional)", key="product_query",
+        placeholder="Brand, generic or HCPCS code, e.g. Keytruda, pembrolizumab, J9271",
+        help="Searches the FDA NDC Directory. Picking a package fills in its NDC (and the HCPCS code when "
+             "the CMS crosswalk has exactly one). You can also type any NDC straight into the form.",
+    )
+    demo_col.selectbox("Or fill in a demo line (optional)", list(EXAMPLES), key="example", on_change=load_example)
+    if query and len(query.strip()) >= 3:
+        matches = search_products(query.strip())
+        if matches:
+            st.selectbox(
+                f"{len(matches)}{'+' if len(matches) == 50 else ''} matching packages: pick one to fill in the NDC",
+                range(len(matches)), index=None, key="product_pick",
+                format_func=lambda i: product_label(matches[i]),
+                placeholder="Choose a package…",
+                on_change=use_product, args=(matches,),
+            )
+            if len(matches) == 50:
+                st.caption("Showing the first 50. Packages with a HCPCS crosswalk are listed first; refine the search to narrow it.")
+        else:
+            st.caption("No product matches that name or HCPCS code. You can still type an NDC below.")
+    elif query:
+        st.caption("Type at least 3 characters.")
     with st.form("single"):
         a, b, c, d = st.columns([2.2, 1, 1.3, 1])
         ndc = a.text_input("NDC (any format)", key="f_ndc", placeholder="0006-3026-02")
