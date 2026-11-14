@@ -102,3 +102,11 @@ def test_mixed_uoms_in_group(ref):
     ]
     (g,) = convert_lines(lines, ref)
     assert codes(g.result)["uom_mixed"] == "penalty"
+
+
+def test_ea_on_liquid_offers_whole_item_reading(ref):
+    # 1 EA of a 4 mL vial billed in ML: most likely one vial = 4 mL = 10 J9035 units
+    r = convert_line(ClaimLine(ndc=BEV, quantity=1, hcpcs="J9035", unit_of_measure="EA"), ref)
+    msg = next(i.message for i in r.issues if i.code == "uom_ea_items")
+    assert "4 ML = 10 J9035 units" in msg
+    assert msg in r.reasons  # shown with the reasons, not just in the flags

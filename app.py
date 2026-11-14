@@ -5,9 +5,12 @@ Run locally:  .venv/Scripts/python -m streamlit run app.py
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import io
 import os
 import re
+import sys
 import tempfile
 import threading
 from dataclasses import replace
@@ -16,16 +19,52 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from converter.aggregate import GroupResult, convert_lines
-from converter.convert import ClaimLine, PatientDataError
-from converter.infer import Settings
-from converter.reference import ReferenceStore
-from converter.report import group_rows, line_rows, lines_from_dataframe, template_csv
-from converter.uom import LABELS as UOM_LABELS
-from data.build_app_store import materialize
-from ui import components as ui
-
 ROOT = Path(__file__).resolve().parent
+
+# --- keep the engine in step with the code after a redeploy ---------------------------------------
+# Streamlit Cloud pulls new code into a running process and re-runs app.py, but modules it already
+# imported (converter.*, data.*, ui.*) can stay at their old version, and so can objects cached with
+# st.cache_resource. That mix caused "'ReferenceStore' object has no attribute 'search_products'".
+# So: fingerprint the engine code, and when it changes, reload the engine modules (dependencies
+# first) before importing from them; the cached store is keyed on the same fingerprint.
+ENGINE_MODULES = [
+    "converter.ndc", "converter.crosswalk", "converter.infer", "converter.financial", "converter.uom",
+    "converter.convert", "converter.aggregate", "converter.reference", "converter.report",
+    "data.refresh", "data.build_app_store", "ui.components",
+]
+
+
+def code_version() -> str:
+    digest = hashlib.sha1()
+    for name in ENGINE_MODULES:
+        path = ROOT.joinpath(*name.split(".")).with_suffix(".py")
+        if path.exists():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+@st.cache_resource
+def _process_state() -> dict:
+    return {}
+
+
+CODE_VERSION = code_version()
+_state = _process_state()
+if _state.get("code_version") not in (None, CODE_VERSION):
+    for _name in ENGINE_MODULES:
+        if _name in sys.modules:
+            importlib.reload(sys.modules[_name])
+_state["code_version"] = CODE_VERSION
+
+from converter.aggregate import GroupResult, convert_lines  # noqa: E402
+from converter.convert import ClaimLine, PatientDataError  # noqa: E402
+from converter.infer import Settings  # noqa: E402
+from converter.reference import ReferenceStore  # noqa: E402
+from converter.report import group_rows, line_rows, lines_from_dataframe, template_csv  # noqa: E402
+from converter.uom import LABELS as UOM_LABELS  # noqa: E402
+from data.build_app_store import materialize  # noqa: E402
+from ui import components as ui  # noqa: E402
+
 FULL_DB = ROOT / "data" / "reference.duckdb"  # built locally by python -m data.refresh
 APP_PARQUET = ROOT / "data" / "app"  # committed slim copy (python -m data.build_app_store)
 BUILT_DB = Path(tempfile.gettempdir()) / "drug_unit_converter" / "reference.duckdb"
@@ -42,8 +81,17 @@ ui.inject_css()
 # --- reference store -----------------------------------------------------------------------------
 
 
-@st.cache_resource(show_spinner="Loading reference data…")
 def load_store() -> tuple[ReferenceStore | None, threading.Lock, str | None]:
+    return _load_store(CODE_VERSION)
+
+
+@st.cache_resource(show_spinner="Loading reference data…", max_entries=2)
+def _load_store(version: str) -> tuple[ReferenceStore | None, threading.Lock, str | None]:
+    # `version` is only the cache key (no leading underscore: Streamlit doesn't hash those arguments)
+    return _open_store()
+
+
+def _open_store() -> tuple[ReferenceStore | None, threading.Lock, str | None]:
     if FULL_DB.exists() and not os.environ.get("DUC_USE_BUNDLED"):  # DUC_USE_BUNDLED=1 tests the deploy path
         return ReferenceStore(FULL_DB), threading.Lock(), "local full store"
     if any(APP_PARQUET.glob("*.parquet")):

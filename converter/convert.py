@@ -302,8 +302,19 @@ def convert_line(
         res.ncpdp_unit = est.ndc_unit
 
     # 4. Both readings: structural decision, then financial check
-    hint, uom_issues = uom_hint(normalize_uom(line.unit_of_measure), res.ncpdp_unit, est.hcpcs_dosage)
+    uom = normalize_uom(line.unit_of_measure)
+    hint, uom_issues = uom_hint(uom, res.ncpdp_unit, est.hcpcs_dosage)
     issues.extend(uom_issues)
+    if uom == "EA" and res.ncpdp_unit in ("ML", "GM") and est.ndc_units_per_item and est.factor:
+        # EA on a liquid / weighed product usually means whole vials (or tubes) were counted
+        per = est.ndc_units_per_item
+        ndc_if_items = line.quantity * per
+        issues.append(Issue(
+            "uom_ea_items",
+            f"if {_fmt_q(line.quantity)} EA counts whole items of {_fmt_q(per)} {res.ncpdp_unit}, that is "
+            f"{_fmt_q(ndc_if_items)} {res.ncpdp_unit} = {_fmt_q(ndc_if_items * est.factor)} {est.hcpcs} units",
+            "penalty",
+        ))
     decision = decide(line.quantity, est, settings, waste_quantity, hint)
     res.readings = decision.readings
     fc = financial_check(line, decision.readings, res.ncpdp_unit, ref.asp_price(est.hcpcs), nadac, settings)
@@ -325,3 +336,7 @@ def convert_line(
     res.confidence = level
     res.reasons = reasons + extra
     return res
+
+
+def _fmt_q(x: float) -> str:
+    return f"{x:,.4f}".rstrip("0").rstrip(".")
