@@ -1,0 +1,13 @@
+claim_id,line_no,ndc,quantity,hcpcs,modifiers,date_of_service,ingredient_cost,allowed_amount,billed_amount,fee,expected_basis,note
+SYN-0001,1,0006-3026-02,200,J9271,,2026-11-02,,12450.60,14000.00,,HCPCS,pembrolizumab 200 mg = 200 x J9271 (1 mg) = 2 vials x 4 mL
+SYN-0002,1,00006302602,8,,,2026-11-02,12200.00,,,,NDC,same dose billed in NDC units (8 mL)
+SYN-0003,1,55513-710-01,60,J0897,,2026-11-03,,1791.36,2100.00,,HCPCS,denosumab 60 mg = 60 x J0897 (1 mg)
+SYN-0004,1,57894-030-01,40,J1745,,2026-11-04,,1194.24,1500.00,,HCPCS,infliximab 400 mg = 40 x J1745 (10 mg) = 4 EA powder vials
+SYN-0005,1,50242-060-01,35,J9035,,2026-11-05,,2642.22,3000.00,,HCPCS,bevacizumab 350 mg administered (35 x J9035 10 mg)
+SYN-0005,2,50242-060-01,5,J9035,JW,2026-11-05,,377.46,450.00,,HCPCS,50 mg discarded from 4 x 100 mg vials
+SYN-0006,1,5024206001,4,,,2026-11-05,,,,,NDC,ambiguous unhyphenated 10-digit NDC; resolves to 50242-0060-01
+SYN-0007,1,55513-0710-01,60,J0897,,2026-11-06,,,5400.00,,HCPCS,billed charge only (about 3x ASP): markup test instead of the +/-25% band
+SYN-0008,1,55513071001,1,,,2026-11-06,1850.00,1862.50,,12.50,NDC,pharmacy claim: 1 mL syringe at NADAC; ingredient cost used and fee left out
+SYN-0009,1,61755-0005-02,2,J0178,RT,2026-11-07,,1444.50,,,HCPCS,aflibercept 2 mg right eye (2 x J0178 1 mg = one 0.05 mL vial)
+SYN-0009,2,61755-0005-02,2,J0178,LT,2026-11-07,,1444.50,,,HCPCS,aflibercept 2 mg left eye; RT + LT roll up to 4 units = 0.1 mL
+SYN-0010,1,50242-0060-01,40,J9035,JZ,2026-11-08,,3019.68,,,HCPCS,bevacizumab 400 mg from 4 full vials; JZ = no waste
