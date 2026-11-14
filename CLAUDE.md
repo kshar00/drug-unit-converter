@@ -245,6 +245,19 @@ All files are loaded into a local reference store (DuckDB or SQLite) with a refr
   - Final basis disagreeing with the hint -> penalty `uom_conflict`; mixed units within a group -> penalty.
 - Samples now carry a unit_of_measure column; SYN-0011 shows the ML-on-powder-vial mismatch.
 
+### Always both numbers (best guess)
+
+- Requirement from the user: whatever is entered, the tool returns both NDC and HCPCS units.
+- When structure, price and unit of measure can't decide, `convert.best_guess` picks the billing
+  convention: a line with a HCPCS code -> HCPCS units (medical claim), without one -> NDC units
+  (pharmacy claim), never a structurally impossible reading. Result: `basis_is_guess=True`,
+  confidence Low, a "best guess" reason with the other reading, and an amber note in the UI.
+- KP/KQ reconciliation treats guessed lines as undecided, so a partner line can still settle them.
+- Unpriced simulation: 88.5% correct (was 70% + 30% undecided); the 1,693 wrong are all labelled
+  best guess / Low (NDC-unit quantities on lines that carry a HCPCS code). Priced results unchanged.
+- Product search (`ReferenceStore.search_products`) and the engine-reload fix for Streamlit Cloud
+  redeploys are in place (see app.py header comment).
+
 ## Agent team (Claude Code subagents)
 
 Recommendation: start with two or three agents (data engineer, developer, code reviewer), get the flow working, then add the data analyst. Each extra agent adds token cost and coordination overhead.

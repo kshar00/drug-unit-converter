@@ -61,15 +61,16 @@ def test_hints():
 
 def test_uom_breaks_structural_tie(ref):
     without = convert_line(ClaimLine(ndc=BEV, quantity=35, hcpcs="J9035"), ref)
-    assert without.inferred_basis is None
+    assert without.basis_is_guess and without.inferred_basis == "HCPCS"
     r = convert_line(ClaimLine(ndc=BEV, quantity=35, hcpcs="J9035", unit_of_measure="ML"), ref)
+    assert not r.basis_is_guess
     assert (r.inferred_basis, r.ndc_units, r.confidence) == ("NDC", 35, "Medium")
     assert "uom_matches" in codes(r)
 
 
 def test_milligram_uom_with_one_mg_descriptor_does_not_apply_to_10mg(ref):
     r = convert_line(ClaimLine(ndc=BEV, quantity=35, hcpcs="J9035", unit_of_measure="ME"), ref)
-    assert r.inferred_basis is None and "uom_no_hint" in codes(r)
+    assert r.basis_is_guess and "uom_no_hint" in codes(r)
 
 
 def test_uom_cannot_overrule_price(ref):

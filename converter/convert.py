@@ -105,6 +105,7 @@ class ConversionResult:
     candidates: list[FactorEstimate] = field(default_factory=list)
     # quantities
     inferred_basis: str | None = None  # "NDC", "HCPCS", "EITHER" or None
+    basis_is_guess: bool = False  # True when the checks couldn't decide and the basis is the billing-convention default
     ndc_units: float | None = None
     hcpcs_units: float | None = None
     readings: dict[str, Reading] = field(default_factory=dict)
@@ -327,6 +328,20 @@ def convert_line(
             f"the claim's unit of measure ({line.unit_of_measure}) points to {hint} units, but the checks say {basis}",
             "penalty",
         ))
+    if basis is None:
+        guess = best_guess(line, decision.readings)
+        if guess:
+            basis, level = guess, "Low"
+            res.basis_is_guess = True
+            reasons.append(
+                f"best guess: {guess} units, because "
+                + ("the line has a HCPCS code, and quantities on medical claim lines are usually HCPCS units"
+                   if guess == "HCPCS" and line.hcpcs else
+                   "the line has no HCPCS code, and pharmacy claim quantities are usually NDC units"
+                   if guess == "NDC" and not line.hcpcs else
+                   "the other reading is not possible")
+                + f"; the other reading would give {_other_reading(decision.readings, guess)}"
+            )
     res.inferred_basis = basis
     if basis in ("NDC", "HCPCS", "EITHER"):
         r = decision.readings["NDC" if basis == "EITHER" else basis]
@@ -340,3 +355,23 @@ def convert_line(
 
 def _fmt_q(x: float) -> str:
     return f"{x:,.4f}".rstrip("0").rstrip(".")
+
+
+def best_guess(line: ClaimLine, readings: dict[str, Reading]) -> str | None:
+    """Default basis when the checks can't decide, so the user always gets both numbers.
+
+    Billing convention: a line with a HCPCS code is a medical claim line, whose quantity is normally in
+    HCPCS units; a line without one is normally a pharmacy line, in NDC units. A reading that is not
+    possible (e.g. a fractional quantity read as HCPCS units) is never chosen.
+    """
+    preferred = ["HCPCS", "NDC"] if line.hcpcs else ["NDC", "HCPCS"]
+    for basis in preferred:
+        r = readings.get(basis)
+        if r is not None and r.feasible:
+            return basis
+    return None
+
+
+def _other_reading(readings: dict[str, Reading], chosen: str) -> str:
+    other = readings["NDC" if chosen == "HCPCS" else "HCPCS"]
+    return f"{_fmt_q(other.ndc_units)} NDC units = {_fmt_q(other.hcpcs_units)} HCPCS units"

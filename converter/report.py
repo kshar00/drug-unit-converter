@@ -101,6 +101,7 @@ def result_row(r: ConversionResult) -> dict:
         "quantity": _num(r.line.quantity),
         "unit_of_measure": r.line.unit_of_measure,
         "inferred_basis": r.inferred_basis or "unknown",
+        "basis_is_guess": r.basis_is_guess,
         "ndc_units": _num(r.ndc_units),
         "hcpcs_units": _num(r.hcpcs_units),
         "reading_if_ndc_units": _num(r.readings["NDC"].hcpcs_units) if "NDC" in r.readings else None,

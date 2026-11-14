@@ -201,3 +201,26 @@ def test_patient_columns_refused(col):
 def test_required_fields():
     with pytest.raises(ValueError):
         ClaimLine.from_mapping({"ndc": "0006-3026-02"})
+
+
+def test_best_guess_follows_billing_convention(ref):
+    # Dualcode-free check on Testumab: 4 mL vial, 25 units/mL. 2 with a HCPCS code -> HCPCS guess;
+    # without a HCPCS code -> NDC guess. Both always return both numbers.
+    r = convert_line(ClaimLine(ndc="11111-0001-01", quantity=2, hcpcs="J9271"), ref)
+    if r.basis_is_guess:
+        assert r.inferred_basis == "HCPCS" and r.confidence == "Low"
+    assert r.ndc_units is not None and r.hcpcs_units is not None
+    r = convert_line(ClaimLine(ndc="11111-0001-01", quantity=2), ref)
+    if r.basis_is_guess:
+        assert r.inferred_basis == "NDC" and r.confidence == "Low"
+    assert r.ndc_units is not None and r.hcpcs_units is not None
+
+
+def test_best_guess_never_picks_an_impossible_reading(ref):
+    # 2.5 can't be HCPCS units (not whole), so even with a HCPCS code the guess must be NDC
+    from converter.convert import best_guess
+    from converter.infer import decide
+    from converter.crosswalk import FactorEstimate
+    est = FactorEstimate("J9271", None, "1 MG", None, "ML", 25, 4, 4, 100, "cms")
+    readings = decide(2.5, est).readings
+    assert best_guess(ClaimLine(ndc="x", quantity=2.5, hcpcs="J9271"), readings) == "NDC"

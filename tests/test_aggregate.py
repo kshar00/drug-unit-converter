@@ -85,9 +85,14 @@ def test_jw_decides_without_prices(ref):
     assert "JW waste is 0.5 of one item" in g.result.reasons[0]
 
 
-def test_same_quantity_without_jw_is_undecided(ref):
+def test_same_quantity_without_jw_is_a_best_guess(ref):
     (g,) = convert_lines([line(35)], ref)
-    assert g.result.inferred_basis is None
+    r = g.result
+    # structure can't tell 35 units from 35 mL; a HCPCS line defaults to HCPCS units, labelled as a guess
+    assert (r.inferred_basis, r.basis_is_guess, r.confidence) == ("HCPCS", True, "Low")
+    assert (r.ndc_units, r.hcpcs_units) == (14, 35)
+    assert any(x.startswith("best guess: HCPCS") for x in r.reasons)
+    assert g.lines[0].ndc_units == 14  # line breakdown filled in too
 
 
 def test_jw_and_jz_is_low(ref):

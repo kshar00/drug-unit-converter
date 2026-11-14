@@ -226,8 +226,9 @@ def _reconcile_shared_ndc(same: list[GroupResult]) -> None:
 
     Decided lines must agree; an undecided line takes whichever reading matches its decided partner.
     """
-    decided = [g for g in same if g.result.ndc_units is not None]
-    undecided = [g for g in same if g.result.ndc_units is None and g.result.readings]
+    # a best-guess basis is not evidence: treat those lines as undecided
+    decided = [g for g in same if g.result.ndc_units is not None and not g.result.basis_is_guess]
+    undecided = [g for g in same if g.result.readings and (g.result.ndc_units is None or g.result.basis_is_guess)]
     qtys = sorted({round(g.result.ndc_units, 3) for g in decided})
 
     def mismatch(groups, values):
@@ -253,10 +254,12 @@ def _reconcile_shared_ndc(same: list[GroupResult]) -> None:
             continue
         rd = r.readings[match[0]]
         r.inferred_basis, r.ndc_units, r.hcpcs_units = match[0], rd.ndc_units, rd.hcpcs_units
+        r.basis_is_guess = False
         r.issues.append(Issue("resolved_by_partner", f"unit basis taken from the KP/KQ partner line ({target:g} NDC units)"))
         level, extra = apply_issues("Medium", r.issues)
         r.confidence = level
-        r.reasons = [f"{match[0]} reading chosen to match the KP/KQ partner's {target:g} NDC units", *r.reasons[1:], *extra]
+        kept = [x for x in r.reasons[1:] if not x.startswith("best guess")]
+        r.reasons = [f"{match[0]} reading chosen to match the KP/KQ partner's {target:g} NDC units", *kept, *extra]
         g.lines = _shares([s.line for s in g.lines], r)
     for g in same:
         if g.result.ndc_units is not None:

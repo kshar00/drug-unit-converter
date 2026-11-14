@@ -237,11 +237,23 @@ def render_group(g: GroupResult) -> None:
         ui.tile("NDC units", fmt(r.ndc_units), r.ncpdp_unit or "unit unknown"),
         ui.tile("HCPCS units", fmt(r.hcpcs_units), r.hcpcs or "no HCPCS match"),
         ui.tile("Quantity was in", BASIS.get(r.inferred_basis, r.inferred_basis),
-                f"factor {fmt(r.factor)} HCPCS per NDC unit" if r.factor else ""),
+                ("best guess · " if r.basis_is_guess else "")
+                + (f"factor {fmt(r.factor)} HCPCS per NDC unit" if r.factor else "")),
         ui.tile("Confidence", ui.pill(r.confidence), "", accent=r.confidence, raw_value=True),
     ])
 
-    if r.inferred_basis is None and r.readings:
+    if r.basis_is_guess and r.readings:
+        other = "NDC" if r.inferred_basis == "HCPCS" else "HCPCS"
+        o = r.readings[other]
+        ui.note(
+            "Best guess. ",
+            f"The checks couldn't tell which unit {fmt(line.quantity)} is in, so this uses the usual billing "
+            f"convention ({'a line with a HCPCS code is counted in HCPCS units' if r.inferred_basis == 'HCPCS' else 'a line without a HCPCS code is counted in NDC units'}). "
+            f"If it's {BASIS[other]} instead: {fmt(o.ndc_units)} {r.ncpdp_unit or 'NDC units'} = "
+            f"{fmt(o.hcpcs_units)} HCPCS units. An allowed amount or ingredient cost would settle it.",
+            accent=ui.CONFIDENCE_COLOURS["Medium"],
+        )
+    elif r.inferred_basis is None and r.readings:
         st.warning(
             f"Couldn't tell which unit {fmt(line.quantity)} is in. If it's NDC units it is "
             f"{fmt(r.readings['NDC'].hcpcs_units)} HCPCS units; if it's HCPCS units it is "

@@ -55,6 +55,8 @@ def main() -> None:
                 r = convert_line(ClaimLine(ndc=p["ndc11"], quantity=q, hcpcs=p["hcpcs"], **kw), ref)
                 got = r.inferred_basis
                 k = "correct" if got in (basis, "EITHER") else ("undecided" if got is None else "WRONG")
+                if r.basis_is_guess:
+                    k += " (best guess)"
                 outcome[(basis, k)] += 1
                 conf[(k, r.confidence)] += 1
                 if k != "correct":
