@@ -227,6 +227,23 @@ All files are loaded into a local reference store (DuckDB or SQLite) with a refr
   sample batch (12 lines, 10 results, 7 High / 3 Medium), result drill-down (Eylea RT/LT, High).
 - Deploy steps are in README.md: push to GitHub, create the app on share.streamlit.io (main file
   `app.py`, Python 3.11).
+- Live on Streamlit Community Cloud from GitHub `kshar00/drug-unit-converter`, branch `main`
+  (deployed with Streamlit's default Python rather than 3.11; works).
+- A UI redesign for a more professional look is running in its own session (owns `app.py` and
+  `.streamlit/`), including the unit-of-measure select in the single-line form.
+
+### Unit of measure (added after milestone 5)
+
+- New optional input `ClaimLine.unit_of_measure` (CSV column `unit_of_measure`, aliases uom / unit /
+  unit_qualifier…): NCPDP EA / ML / GM or 837 qualifiers UN / ML / GR / F2 / ME. Logic in `converter/uom.py`.
+- Used as a weak hint (+1 to a reading, vs +2 for structural checks), so it breaks ties but can't
+  overturn structure or price:
+  - EA / ML / GM equal to the product's NCPDP unit -> hints NDC units.
+  - EA / ML / GM not equal to it -> penalty `uom_mismatch` (e.g. ML on a powder vial billed EA), no hint.
+  - UN -> no hint (used for both "each" and HCPCS service units, often a default).
+  - ME / F2 when the HCPCS descriptor is exactly 1 mg / 1 unit -> hints HCPCS units.
+  - Final basis disagreeing with the hint -> penalty `uom_conflict`; mixed units within a group -> penalty.
+- Samples now carry a unit_of_measure column; SYN-0011 shows the ML-on-powder-vial mismatch.
 
 ## Agent team (Claude Code subagents)
 

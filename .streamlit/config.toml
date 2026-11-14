@@ -1,6 +1,15 @@
 [theme]
-primaryColor = "#b3261e"
+# Shared by both themes. Defining [theme.light] and [theme.dark] lets the app follow the
+# viewer's system setting (a single custom theme would force light mode).
 font = "sans serif"
+baseRadius = "0.45rem"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#0b6e8a"
+
+[theme.dark]
+primaryColor = "#23839f"
 
 [server]
 maxUploadSize = 20

@@ -10,7 +10,7 @@ from converter.aggregate import GroupResult
 from converter.convert import _PATIENT_FIELD, ClaimLine, ConversionResult, PatientDataError
 
 INPUT_COLUMNS = [
-    "claim_id", "line_no", "ndc", "quantity", "hcpcs", "modifiers", "date_of_service",
+    "claim_id", "line_no", "ndc", "quantity", "unit_of_measure", "hcpcs", "modifiers", "date_of_service",
     "ingredient_cost", "allowed_amount", "billed_amount", "fee",
 ]
 
@@ -27,6 +27,9 @@ _ALIASES = {
     "allowed_amount": "allowed_amount", "allowed": "allowed_amount",
     "billed_amount": "billed_amount", "billed": "billed_amount", "charge": "billed_amount", "charges": "billed_amount",
     "fee": "fee", "dispensing_fee": "fee", "admin_fee": "fee", "administration_fee": "fee",
+    "unit_of_measure": "unit_of_measure", "uom": "unit_of_measure", "unit": "unit_of_measure",
+    "unit_qualifier": "unit_of_measure", "ndc_unit_qualifier": "unit_of_measure", "quantity_qualifier": "unit_of_measure",
+    "basis_of_measure": "unit_of_measure", "ncpdp_unit_of_measure": "unit_of_measure",
     "claim_id": "claim_id", "claim": "claim_id", "claim_number": "claim_id",
     "line_no": "line_no", "line": "line_no", "line_number": "line_no",
 }
@@ -96,6 +99,7 @@ def result_row(r: ConversionResult) -> dict:
         "hcpcs_per_ndc_unit": _num(r.factor),
         "modifiers": " ".join(r.line.modifiers) or None,
         "quantity": _num(r.line.quantity),
+        "unit_of_measure": r.line.unit_of_measure,
         "inferred_basis": r.inferred_basis or "unknown",
         "ndc_units": _num(r.ndc_units),
         "hcpcs_units": _num(r.hcpcs_units),
@@ -138,6 +142,7 @@ def line_rows(groups: list[GroupResult]) -> pd.DataFrame:
                 "modifiers": " ".join(s.line.modifiers) or None,
                 "role": s.role,
                 "quantity": _num(s.line.quantity),
+                "unit_of_measure": s.line.unit_of_measure,
                 "ndc_units": _num(s.ndc_units),
                 "hcpcs_units": _num(s.hcpcs_units),
                 "group_basis": g.result.inferred_basis or "unknown",

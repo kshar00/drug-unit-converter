@@ -121,6 +121,9 @@ def _group_issues(lines: list[ClaimLine]) -> list[Issue]:
             issues.append(Issue("duplicate_side", f"{roles[side]} lines with {side}; possible duplicate", "penalty"))
     if roles["waste"] > 1:
         issues.append(Issue("duplicate_waste", f"{roles['waste']} JW lines; possible duplicate", "penalty"))
+    uoms = {l.unit_of_measure for l in lines if l.unit_of_measure}
+    if len(uoms) > 1:
+        issues.append(Issue("uom_mixed", f"lines in the group report different units of measure ({', '.join(sorted(uoms))})", "penalty"))
     if len(lines) > 1:
         parts = ", ".join(f"{n} {r}" for r, n in roles.items())
         issues.append(Issue("aggregated", f"{len(lines)} lines combined ({parts})"))

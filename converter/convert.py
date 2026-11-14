@@ -18,6 +18,7 @@ from converter.crosswalk import UNCLASSIFIED_HCPCS, FactorEstimate, Issue, hcpcs
 from converter.financial import FinancialCheck, financial_check
 from converter.infer import DEFAULT_SETTINGS, Reading, Settings, apply_issues, combine, decide
 from converter.ndc import NDCFormatError
+from converter.uom import normalize_uom, uom_hint
 
 # Column names that suggest patient-level data. The tool refuses them rather than silently dropping.
 _PATIENT_FIELD = re.compile(
@@ -49,6 +50,7 @@ class ClaimLine:
     allowed_amount: float | None = None
     billed_amount: float | None = None
     fee: float | None = None  # dispensing or admin fee
+    unit_of_measure: str | None = None  # claim's unit for the quantity: EA, ML, GM, UN, F2, ME (see converter.uom)
     claim_id: str | None = None  # synthetic, for grouping lines
     line_no: str | None = None
 
@@ -77,6 +79,8 @@ class ClaimLine:
         for k in ("ingredient_cost", "allowed_amount", "billed_amount", "fee"):
             if k in d:
                 d[k] = _opt_float(d[k])
+        if "unit_of_measure" in d:
+            d["unit_of_measure"] = normalize_uom(d["unit_of_measure"])
         for k in ("hcpcs", "claim_id", "line_no", "ndc"):
             if k in d:
                 d[k] = str(d[k]).strip()
@@ -298,12 +302,20 @@ def convert_line(
         res.ncpdp_unit = est.ndc_unit
 
     # 4. Both readings: structural decision, then financial check
-    decision = decide(line.quantity, est, settings, waste_quantity)
+    hint, uom_issues = uom_hint(normalize_uom(line.unit_of_measure), res.ncpdp_unit, est.hcpcs_dosage)
+    issues.extend(uom_issues)
+    decision = decide(line.quantity, est, settings, waste_quantity, hint)
     res.readings = decision.readings
     fc = financial_check(line, decision.readings, res.ncpdp_unit, ref.asp_price(est.hcpcs), nadac, settings)
     res.financial_check = fc
     issues.extend(fc.issues)
     basis, level, reasons = combine(decision, fc)
+    if hint and basis in ("NDC", "HCPCS") and basis != hint:
+        issues.append(Issue(
+            "uom_conflict",
+            f"the claim's unit of measure ({line.unit_of_measure}) points to {hint} units, but the checks say {basis}",
+            "penalty",
+        ))
     res.inferred_basis = basis
     if basis in ("NDC", "HCPCS", "EITHER"):
         r = decision.readings["NDC" if basis == "EITHER" else basis]

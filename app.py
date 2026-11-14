@@ -20,7 +20,9 @@ from converter.convert import ClaimLine, PatientDataError
 from converter.infer import Settings
 from converter.reference import ReferenceStore
 from converter.report import group_rows, line_rows, lines_from_dataframe, template_csv
+from converter.uom import LABELS as UOM_LABELS
 from data.build_app_store import materialize
+from ui import components as ui
 
 ROOT = Path(__file__).resolve().parent
 FULL_DB = ROOT / "data" / "reference.duckdb"  # built locally by python -m data.refresh
@@ -29,9 +31,11 @@ BUILT_DB = Path(tempfile.gettempdir()) / "drug_unit_converter" / "reference.duck
 SAMPLE_CSV = ROOT / "samples" / "synthetic_claims.csv"
 MAX_BATCH_LINES = 5000
 MODIFIERS = ["JW", "JZ", "RT", "LT", "KP", "KQ"]
+UOM_CHOICES = ["", "EA", "ML", "GM", "UN", "F2", "ME"]
 AMOUNT_FIELDS = ("ingredient_cost", "allowed_amount", "billed_amount", "fee")
 
-st.set_page_config(page_title="Drug Unit Converter", page_icon="💊", layout="wide")
+st.set_page_config(page_title="Drug Unit Converter", page_icon=":material/medication:", layout="wide")
+ui.inject_css()
 
 
 # --- reference store -----------------------------------------------------------------------------
@@ -81,33 +85,60 @@ def convert_csv(source: bytes, band: float, typical: float):
     return len(lines), groups, errors, ignored
 
 
+vintage = None
+if store is not None:
+    try:
+        vintage = data_vintage(db_name)
+    except Exception:  # refresh_log missing in a hand-built store
+        vintage = None
+
+
 # --- sidebar -------------------------------------------------------------------------------------
 
 with st.sidebar:
-    st.markdown("### No patient data")
-    st.info(
+    ui.note(
+        "No patient data",
         "This tool never asks for or stores patient name, ID, date of birth, prescriber or Rx number. "
         "Enter synthetic or de-identified claim lines only. Uploads with patient-like columns are refused, "
-        "and nothing you enter is saved."
+        "and nothing you enter is saved.",
     )
-    st.markdown("### Settings")
+    ui.label("Settings")
     band = st.slider("Price tolerance band (±%)", 5, 60, 25, 5,
                      help="An implied price within this % of ASP or NADAC counts as a fit.")
     typical = st.slider("Typical maximum packages per line", 2, 50, 12,
                         help="Readings above this many packages score lower in the structural check.")
     settings = Settings(tolerance_band=band / 100, typical_max_packages=typical)
     if store is not None:
-        st.markdown("### Reference data")
-        try:
-            st.dataframe(data_vintage(db_name), hide_index=True, use_container_width=True)
-        except Exception:  # refresh_log missing in a hand-built store
-            st.caption(db_name)
-        st.caption("Public sources: FDA NDC Directory, CMS ASP NDC-HCPCS crosswalk and payment limits, Medicaid NADAC.")
+        ui.label("Reference data")
+        if vintage is not None:
+            st.dataframe(
+                vintage, hide_index=True, width="stretch", column_order=["source", "quarter", "rows"],
+                column_config={
+                    "source": st.column_config.TextColumn("Source"),
+                    "quarter": st.column_config.TextColumn("Period"),
+                    "rows": st.column_config.NumberColumn("Rows", format="localized"),
+                },
+            )
+            loaded = str(pd.to_datetime(vintage["loaded"]).max().date()) if "loaded" in vintage and len(vintage) else ""
+        else:
+            loaded = ""
+        st.caption(f"{db_name.capitalize()}{f', loaded {loaded}' if loaded else ''}. Public sources: FDA NDC "
+                   "Directory, CMS ASP NDC-HCPCS crosswalk and payment limits, Medicaid NADAC.")
 
-st.title("Drug Unit Converter")
-st.markdown(
-    "Takes a drug claim line where you don't know whether the quantity is in **NDC (NCPDP) units** or "
-    "**HCPCS billing units**, and returns both, which one it most likely is, and how sure it is."
+
+# --- header --------------------------------------------------------------------------------------
+
+chips = ["Public data only", "No PHI"]
+if vintage is not None and not vintage.empty:
+    cms = vintage[vintage["source"].str.contains("asp", case=False)]["quarter"]
+    if not cms.empty and cms.iloc[0]:
+        chips.append(f"CMS ASP {cms.iloc[0]}")
+chips.append(f"Tolerance ±{band}%")
+ui.header(
+    "Drug Unit Converter",
+    "NDC (NCPDP) units ↔ HCPCS billing units for drug claim lines whose quantity basis is unknown, "
+    "with the likely basis, a confidence level and the evidence behind it.",
+    chips,
 )
 
 if store is None:
@@ -117,8 +148,9 @@ if store is None:
 
 # --- result rendering ----------------------------------------------------------------------------
 
-BADGE = {"High": ":green[**High**]", "Medium": ":orange[**Medium**]", "Low": ":red[**Low**]"}
-BASIS = {"NDC": "NDC units", "HCPCS": "HCPCS units", "EITHER": "either (1:1)", None: "unknown"}
+BASIS = {"NDC": "NDC units", "HCPCS": "HCPCS units", "EITHER": "Either (1:1)", None: "Undetermined"}
+ROLE = {"administered": "Administered", "waste": "JW waste", "RT": "Right (RT)", "LT": "Left (LT)"}
+SEVERITY = {"edge": "Edge case", "penalty": "Penalty", "info": "Note"}
 
 
 def fmt(x, unit: str = "") -> str:
@@ -128,89 +160,152 @@ def fmt(x, unit: str = "") -> str:
     return f"{s} {unit}".strip()
 
 
+def money(x) -> str:
+    return "–" if x is None else f"${x:,.2f}"
+
+
 def render_group(g: GroupResult) -> None:
     r = g.result
-    st.subheader(r.product_description or f"NDC {r.line.ndc}")
+    line = r.line
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"NDC units ({r.ncpdp_unit or '?'})", fmt(r.ndc_units))
-    c2.metric(f"HCPCS units ({r.hcpcs or '?'})", fmt(r.hcpcs_units))
-    c3.metric("Quantity was in", BASIS.get(r.inferred_basis, r.inferred_basis))
-    with c4:
-        st.markdown("Confidence")
-        st.markdown(f"### {BADGE[r.confidence]}")
+    meta = [f"NDC {r.ndc_hyphenated or line.ndc}"]
+    if r.hcpcs:
+        meta.append(f"{r.hcpcs} ({r.hcpcs_dosage or '?'})")
+    if line.modifiers or g.aggregated:
+        mods = sorted({m for s in g.lines for m in s.line.modifiers})
+        if mods:
+            meta.append("modifiers " + " ".join(mods))
+    if line.unit_of_measure:
+        meta.append(f"claim UoM {line.unit_of_measure}")
+    meta.append(f"quantity {fmt(line.quantity)}")
+    ui.html(
+        '<div class="duc-result-head"><div>'
+        f'<h3>{ui.escape(r.product_description or "Product not found")}</h3>'
+        f'<div class="duc-meta">{ui.escape(" · ".join(meta))}</div></div></div>'
+    )
+
+    ui.tiles([
+        ui.tile("NDC units", fmt(r.ndc_units), r.ncpdp_unit or "unit unknown"),
+        ui.tile("HCPCS units", fmt(r.hcpcs_units), r.hcpcs or "no HCPCS match"),
+        ui.tile("Quantity was in", BASIS.get(r.inferred_basis, r.inferred_basis),
+                f"factor {fmt(r.factor)} HCPCS per NDC unit" if r.factor else ""),
+        ui.tile("Confidence", ui.pill(r.confidence), "", accent=r.confidence, raw_value=True),
+    ])
 
     if r.inferred_basis is None and r.readings:
         st.warning(
-            f"Couldn't tell which unit {fmt(r.line.quantity)} is in. If it's NDC units it is "
+            f"Couldn't tell which unit {fmt(line.quantity)} is in. If it's NDC units it is "
             f"{fmt(r.readings['NDC'].hcpcs_units)} HCPCS units; if it's HCPCS units it is "
             f"{fmt(r.readings['HCPCS'].ndc_units, r.ncpdp_unit or '')}."
         )
 
-    st.markdown("**Why**")
-    st.markdown("\n".join(f"- {reason}" for reason in r.reasons))
+    ui.label("Why")
+    ui.html(ui.reasons_list(r.reasons))
 
     left, right = st.columns(2)
     with left:
-        st.markdown("**Product**")
-        st.dataframe(pd.DataFrame([
+        ui.label("Product")
+        ui.html(ui.kv_table([
             ("NDC (11-digit)", r.ndc_hyphenated or "–"),
             ("NCPDP billing unit", r.ncpdp_unit or "–"),
             ("Package size", fmt(r.package_size, r.ncpdp_unit or "")),
             ("FDA package", r.package_description or "–"),
-        ], columns=["", "value"]), hide_index=True, use_container_width=True)
+        ]))
     with right:
-        st.markdown("**HCPCS**")
-        st.dataframe(pd.DataFrame([
+        ui.label("HCPCS")
+        ui.html(ui.kv_table([
             ("Code", r.hcpcs or "–"),
             ("Descriptor", f"{r.hcpcs_description or ''} ({r.hcpcs_dosage or '?'})" if r.hcpcs else "–"),
             ("HCPCS units per NDC unit", fmt(r.factor)),
-            ("Other candidates", ", ".join(c.hcpcs for c in r.candidates if c.hcpcs != r.hcpcs) or "none"),
-        ], columns=["", "value"]), hide_index=True, use_container_width=True)
+            ("Other candidates", ", ".join(c.hcpcs for c in r.candidates if c.hcpcs != r.hcpcs) or "None"),
+        ]))
 
     fc = r.financial_check
     if fc and fc.comparisons:
-        st.markdown(f"**Price check** (amount used: {fc.amount_field.replace('_', ' ')} "
-                    f"{fmt(fc.amount)}{' after stripping the fee' if fc.fee_stripped else ''})")
+        amount_name = (fc.amount_field or "amount").replace("_", " ")
+        ui.label(f"Price check · {amount_name} {money(fc.amount)}"
+                 f"{' after stripping the fee' if fc.fee_stripped else ''}")
         rows = []
         for c in fc.comparisons:
             for basis in ("NDC", "HCPCS"):
                 if basis in c.implied:
                     rows.append({
-                        "if the quantity is in": BASIS[basis],
+                        "reading": BASIS[basis],
                         "reference": f"{c.reference} per {c.unit}",
-                        "reference price": round(c.reference_price, 4),
-                        "implied price": round(c.implied[basis], 4),
-                        "variance %": round(100 * c.variance[basis], 1),
-                        "fits": "yes" if c.fits[basis] else "no",
+                        "reference_price": c.reference_price,
+                        "implied_price": c.implied[basis],
+                        "variance": round(100 * c.variance[basis], 1) + 0.0,  # no "-0.0%"
+                        "fits": "Fit" if c.fits[basis] else "Outside band",
                     })
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-    if r.readings:
-        with st.expander("Both readings, structural checks"):
-            st.dataframe(pd.DataFrame([
-                {
-                    "if the quantity is in": BASIS[b],
-                    "NDC units": rd.ndc_units, "HCPCS units": rd.hcpcs_units,
-                    "items (vials, tablets…)": rd.items, "packages": rd.packages,
-                    "possible": "yes" if rd.feasible else "no", "score": rd.score,
-                    "passed": "; ".join(rd.passed), "failed": "; ".join(rd.failed),
-                }
-                for b, rd in r.readings.items()
-            ]), hide_index=True, use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(rows), hide_index=True, width="stretch",
+            column_config={
+                "reading": st.column_config.TextColumn("If the quantity is in"),
+                "reference": st.column_config.TextColumn("Reference"),
+                "reference_price": st.column_config.NumberColumn("Reference price", format="$%.4f"),
+                "implied_price": st.column_config.NumberColumn("Implied price", format="$%.4f"),
+                "variance": st.column_config.NumberColumn("Variance", format="%+.1f%%"),
+                "fits": st.column_config.TextColumn(f"Within ±{band}%"),
+            },
+        )
 
     if g.aggregated:
-        with st.expander(f"Line breakdown ({len(g.lines)} lines combined)", expanded=True):
-            st.dataframe(pd.DataFrame([
-                {"line": s.line.line_no, "role": s.role, "modifiers": " ".join(s.line.modifiers),
-                 "quantity": s.line.quantity, "NDC units": s.ndc_units, "HCPCS units": s.hcpcs_units}
-                for s in g.lines
-            ]), hide_index=True, use_container_width=True)
+        with st.expander(f"Line breakdown · {len(g.lines)} lines combined", expanded=True):
+            st.dataframe(
+                pd.DataFrame([
+                    {"line": s.line.line_no, "role": ROLE.get(s.role, s.role),
+                     "modifiers": " ".join(s.line.modifiers), "quantity": s.line.quantity,
+                     "ndc_units": s.ndc_units, "hcpcs_units": s.hcpcs_units}
+                    for s in g.lines
+                ]),
+                hide_index=True, width="stretch",
+                column_config={
+                    "line": st.column_config.TextColumn("Line"),
+                    "role": st.column_config.TextColumn("Role"),
+                    "modifiers": st.column_config.TextColumn("Modifiers"),
+                    "quantity": st.column_config.NumberColumn("Quantity", format="localized"),
+                    "ndc_units": st.column_config.NumberColumn(f"NDC units ({r.ncpdp_unit or '?'})", format="localized"),
+                    "hcpcs_units": st.column_config.NumberColumn("HCPCS units", format="localized"),
+                },
+            )
+
+    if r.readings:
+        with st.expander("Both readings · structural checks"):
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "reading": BASIS[b], "ndc_units": rd.ndc_units, "hcpcs_units": rd.hcpcs_units,
+                        "items": rd.items, "packages": rd.packages, "possible": rd.feasible,
+                        "score": rd.score, "passed": "; ".join(rd.passed), "failed": "; ".join(rd.failed),
+                    }
+                    for b, rd in r.readings.items()
+                ]),
+                hide_index=True, width="stretch",
+                column_config={
+                    "reading": st.column_config.TextColumn("If the quantity is in"),
+                    "ndc_units": st.column_config.NumberColumn("NDC units", format="localized"),
+                    "hcpcs_units": st.column_config.NumberColumn("HCPCS units", format="localized"),
+                    "items": st.column_config.NumberColumn("Items (vials, tablets…)", format="localized"),
+                    "packages": st.column_config.NumberColumn("Packages", format="localized"),
+                    "possible": st.column_config.CheckboxColumn("Possible"),
+                    "score": st.column_config.NumberColumn("Score"),
+                    "passed": st.column_config.TextColumn("Passed", width="large"),
+                    "failed": st.column_config.TextColumn("Failed", width="large"),
+                },
+            )
 
     if r.issues:
-        with st.expander("All flags and notes"):
-            st.dataframe(pd.DataFrame([{"severity": i.severity, "flag": i.code, "detail": i.message} for i in r.issues]),
-                         hide_index=True, use_container_width=True)
+        with st.expander(f"Flags and notes · {len(r.issues)}"):
+            st.dataframe(
+                pd.DataFrame([{"severity": SEVERITY.get(i.severity, i.severity), "flag": i.code, "detail": i.message}
+                              for i in r.issues]),
+                hide_index=True, width="stretch",
+                column_config={
+                    "severity": st.column_config.TextColumn("Severity"),
+                    "flag": st.column_config.TextColumn("Flag"),
+                    "detail": st.column_config.TextColumn("Detail", width="large"),
+                },
+            )
 
 
 # --- tabs ----------------------------------------------------------------------------------------
@@ -220,12 +315,13 @@ tab_one, tab_batch, tab_how = st.tabs(["Single line", "Batch CSV", "How it works
 EXAMPLES = {
     "—": {},
     "Keytruda 200 units, allowed amount (HCPCS units)": dict(ndc="0006-3026-02", qty=200.0, hcpcs="J9271", allowed=12450.60),
-    "Keytruda 8, ingredient cost (NDC units, mL)": dict(ndc="00006302602", qty=8.0, ingredient=12200.0),
+    "Keytruda 8 mL, ingredient cost (NDC units)": dict(ndc="00006302602", qty=8.0, uom="ML", ingredient=12200.0),
     "Avastin 35 units + 5 JW waste": dict(ndc="50242-060-01", qty=35.0, hcpcs="J9035", waste=5.0, allowed=3019.68),
     "Remicade 40, no amounts": dict(ndc="57894-030-01", qty=40.0, hcpcs="J1745"),
     "Ambiguous 10-digit NDC 5024206001, qty 4": dict(ndc="5024206001", qty=4.0),
 }
-FIELDS = dict(ndc="", qty=None, hcpcs="", mods=[], dos=None, waste=None, ingredient=None, allowed=None, billed=None, fee=None)
+FIELDS = dict(ndc="", qty=None, uom="", hcpcs="", mods=[], dos=None, waste=None,
+              ingredient=None, allowed=None, billed=None, fee=None)
 
 
 def load_example():
@@ -235,23 +331,28 @@ def load_example():
 
 
 with tab_one:
-    st.selectbox("Try an example", list(EXAMPLES), key="example", on_change=load_example)
+    top_l, _ = st.columns([2, 3])
+    top_l.selectbox("Load an example", list(EXAMPLES), key="example", on_change=load_example)
     with st.form("single"):
-        a, b, c = st.columns([2, 1, 1])
+        a, b, c, d = st.columns([2.2, 1, 1.3, 1])
         ndc = a.text_input("NDC (any format)", key="f_ndc", placeholder="0006-3026-02")
         qty = b.number_input("Quantity (unit unknown)", min_value=0.0, value=None, step=1.0, key="f_qty")
-        hcpcs = c.text_input("HCPCS code (optional)", key="f_hcpcs", placeholder="J9271")
-        a, b, c = st.columns([2, 1, 1])
+        uom = c.selectbox("Unit of measure (optional)", UOM_CHOICES, key="f_uom",
+                          format_func=lambda v: UOM_LABELS.get(v, "Not given"),
+                          help="The unit reported on the claim, if any. Used as a weak hint: billing "
+                               "systems often fill it in by default.")
+        hcpcs = d.text_input("HCPCS (optional)", key="f_hcpcs", placeholder="J9271")
+        a, b, c = st.columns([2.2, 1.3, 2.3])
         mods = a.multiselect("Modifiers (optional)", MODIFIERS, key="f_mods")
         dos = b.date_input("Date of service (optional)", value=None, key="f_dos")
         waste = c.number_input("JW waste quantity (optional)", min_value=0.0, value=None, step=1.0, key="f_waste",
                                help="Adds a separate JW line, in the same unit as the quantity.")
         with st.expander("Financials (optional, used to confirm the unit basis)"):
             a, b, c, d = st.columns(4)
-            ingredient = a.number_input("Ingredient cost", min_value=0.0, value=None, key="f_ingredient")
-            allowed = b.number_input("Allowed amount", min_value=0.0, value=None, key="f_allowed")
-            billed = c.number_input("Billed amount", min_value=0.0, value=None, key="f_billed")
-            fee = d.number_input("Dispensing / admin fee", min_value=0.0, value=None, key="f_fee")
+            ingredient = a.number_input("Ingredient cost ($)", min_value=0.0, value=None, key="f_ingredient")
+            allowed = b.number_input("Allowed amount ($)", min_value=0.0, value=None, key="f_allowed")
+            billed = c.number_input("Billed amount ($)", min_value=0.0, value=None, key="f_billed")
+            fee = d.number_input("Dispensing / admin fee ($)", min_value=0.0, value=None, key="f_fee")
         submitted = st.form_submit_button("Convert", type="primary")
 
     if submitted:
@@ -262,7 +363,7 @@ with tab_one:
                 ndc=ndc.strip(), quantity=float(qty), hcpcs=hcpcs.strip().upper() or None,
                 modifiers=tuple(m for m in mods if m != "JW"), date_of_service=dos,
                 ingredient_cost=ingredient, allowed_amount=allowed, billed_amount=billed, fee=fee,
-                claim_id="FORM", line_no="1",
+                unit_of_measure=uom or None, claim_id="FORM", line_no="1",
             )
             lines = [line]
             if waste:
@@ -275,19 +376,67 @@ with tab_one:
                 render_group(g)
 
 
+# Batch results table: curated, formatted view; the CSV download keeps every column.
+RESULT_COLUMNS = {
+    "claim_id": st.column_config.TextColumn("Claim"),
+    "line_no": st.column_config.TextColumn("Line"),
+    "ndc11": st.column_config.TextColumn("NDC 11"),
+    "product": st.column_config.TextColumn("Product", width="medium"),
+    "hcpcs": st.column_config.TextColumn("HCPCS"),
+    "modifiers": st.column_config.TextColumn("Mods"),
+    "quantity": st.column_config.NumberColumn("Qty", format="localized"),
+    "unit_of_measure": st.column_config.TextColumn("UoM"),
+    "inferred_basis": st.column_config.TextColumn("Basis"),
+    "confidence": st.column_config.TextColumn("Confidence"),
+    "ndc_units": st.column_config.NumberColumn("NDC units", format="localized"),
+    "ncpdp_unit": st.column_config.TextColumn("NCPDP"),
+    "hcpcs_units": st.column_config.NumberColumn("HCPCS units", format="localized"),
+    "asp_variance_pct": st.column_config.NumberColumn("ASP var.", format="%+.1f%%"),
+    "nadac_variance_pct": st.column_config.NumberColumn("NADAC var.", format="%+.1f%%"),
+    "lines_combined": st.column_config.NumberColumn("Lines"),
+    "flags": st.column_config.TextColumn("Flags", width="medium"),
+    "reason": st.column_config.TextColumn("Reason", width="large"),
+}
+LINE_COLUMNS = {
+    "claim_id": st.column_config.TextColumn("Claim"),
+    "line_no": st.column_config.TextColumn("Line"),
+    "ndc_input": st.column_config.TextColumn("NDC (input)"),
+    "hcpcs": st.column_config.TextColumn("HCPCS"),
+    "modifiers": st.column_config.TextColumn("Mods"),
+    "role": st.column_config.TextColumn("Role"),
+    "quantity": st.column_config.NumberColumn("Qty", format="localized"),
+    "unit_of_measure": st.column_config.TextColumn("UoM"),
+    "ndc_units": st.column_config.NumberColumn("NDC units", format="localized"),
+    "hcpcs_units": st.column_config.NumberColumn("HCPCS units", format="localized"),
+    "group_basis": st.column_config.TextColumn("Group basis"),
+    "group_confidence": st.column_config.TextColumn("Group confidence"),
+}
+
+
+def show_table(df: pd.DataFrame, columns: dict) -> None:
+    order = [c for c in columns if c in df.columns]  # tolerate report columns being added or dropped
+    height = min(35 * (len(df) + 1) + 3, 528)  # show small batches without an inner scrollbar
+    st.dataframe(df, hide_index=True, width="stretch", height=height, column_order=order,
+                 column_config={k: v for k, v in columns.items() if k in df.columns})
+
+
 with tab_batch:
     st.markdown(
-        "Upload a CSV with one claim line per row. Required: **ndc**, **quantity**. Optional: hcpcs, modifiers, "
-        "date_of_service (YYYY-MM-DD), ingredient_cost, allowed_amount, billed_amount, fee, and a synthetic "
-        "claim_id to group JW / RT / LT lines. Common header spellings (qty, dos, hcpcs_code…) are recognised."
+        "Upload a CSV with one claim line per row. Required: **ndc**, **quantity**. Optional: unit_of_measure "
+        "(EA, ML, GM, UN, F2, ME), hcpcs, modifiers, date_of_service (YYYY-MM-DD), ingredient_cost, "
+        "allowed_amount, billed_amount, fee, and a synthetic claim_id to group JW / RT / LT lines. Common header "
+        "spellings (qty, uom, dos, hcpcs_code…) are recognised. Up to "
+        f"{MAX_BATCH_LINES:,} lines."
     )
-    a, b, _ = st.columns([1, 1, 2])
-    a.download_button("Download template", template_csv(), "claims_template.csv", "text/csv")
+    a, b, c, _ = st.columns([1, 1, 1.3, 1.5])
+    a.download_button("Template CSV", template_csv(), "claims_template.csv", "text/csv",
+                      icon=":material/download:", width="stretch")
     if SAMPLE_CSV.exists():
-        b.download_button("Download sample claims", SAMPLE_CSV.read_bytes(), "synthetic_claims.csv", "text/csv")
-    upload = st.file_uploader("Claims CSV", type=["csv"])
-    if st.button("Or run the synthetic sample file"):
+        b.download_button("Sample claims", SAMPLE_CSV.read_bytes(), "synthetic_claims.csv", "text/csv",
+                          icon=":material/download:", width="stretch")
+    if c.button("Run the synthetic sample", icon=":material/play_arrow:", width="stretch"):
         st.session_state["use_sample"] = True
+    upload = st.file_uploader("Claims CSV", type=["csv"])
     if upload is not None:
         st.session_state["use_sample"] = False
 
@@ -296,6 +445,7 @@ with tab_batch:
         source = upload.getvalue()
     elif st.session_state.get("use_sample") and SAMPLE_CSV.exists():
         source = SAMPLE_CSV.read_bytes()
+        st.caption(f"Showing results for the synthetic sample file ({SAMPLE_CSV.name}).")
 
     if source is not None:
         try:
@@ -311,7 +461,7 @@ with tab_batch:
             st.caption(f"Columns not used: {', '.join(ignored)}")
         if errors:
             st.warning(f"{len(errors)} row(s) could not be read and were skipped.")
-            st.dataframe(pd.DataFrame(errors), hide_index=True)
+            st.dataframe(pd.DataFrame(errors), hide_index=True, width="stretch")
         if not groups:
             st.stop()
 
@@ -319,24 +469,34 @@ with tab_batch:
         per_line = line_rows(groups)
 
         counts = out["confidence"].value_counts()
-        m = st.columns(5)
-        m[0].metric("Lines read", n_lines)
-        m[1].metric("Results (after grouping)", len(out))
-        m[2].metric("High", int(counts.get("High", 0)))
-        m[3].metric("Medium", int(counts.get("Medium", 0)))
-        m[4].metric("Low", int(counts.get("Low", 0)))
+        cnt = {k: int(counts.get(k, 0)) for k in ("High", "Medium", "Low")}
+        undecided = int((out["inferred_basis"] == "unknown").sum()) if "inferred_basis" in out else 0
+        ui.tiles([
+            ui.tile("Lines read", f"{n_lines:,}"),
+            ui.tile("Results", f"{len(out):,}", "after grouping JW / RT / LT"),
+            ui.tile("High", f"{cnt['High']:,}", f"{100 * cnt['High'] / len(out):.0f}% of results", accent="High"),
+            ui.tile("Medium", f"{cnt['Medium']:,}", f"{100 * cnt['Medium'] / len(out):.0f}% of results", accent="Medium"),
+            ui.tile("Low", f"{cnt['Low']:,}", f"{undecided} undecided" if undecided else
+                    f"{100 * cnt['Low'] / len(out):.0f}% of results", accent="Low"),
+        ])
+        ui.confidence_bar(cnt)
 
-        st.dataframe(out, hide_index=True, use_container_width=True)
-        with st.expander("Per-line breakdown"):
-            st.dataframe(per_line, hide_index=True, use_container_width=True)
-        a, b, _ = st.columns([1, 1, 2])
-        a.download_button("Download results CSV", out.to_csv(index=False), "converted_claims.csv", "text/csv")
-        b.download_button("Download per-line CSV", per_line.to_csv(index=False), "converted_lines.csv", "text/csv")
+        ui.label("Results")
+        show_table(out, RESULT_COLUMNS)
+        with st.expander(f"Per-line breakdown · {len(per_line)} lines"):
+            show_table(per_line, LINE_COLUMNS)
+        a, b, _ = st.columns([1, 1, 2.8])
+        a.download_button("Results CSV", out.to_csv(index=False), "converted_claims.csv", "text/csv",
+                          icon=":material/download:", width="stretch")
+        b.download_button("Per-line CSV", per_line.to_csv(index=False), "converted_lines.csv", "text/csv",
+                          icon=":material/download:", width="stretch")
 
-        st.markdown("#### Look at one result")
-        labels = [f"{i + 1}. {row.claim_id or ''} {row.ndc11 or row.ndc_input} {row.hcpcs or ''} [{row.confidence}]"
+        st.divider()
+        ui.label("Result detail")
+        labels = [f"{i + 1}. {row.claim_id or ''} · {row.ndc11 or row.ndc_input} · {row.hcpcs or 'no HCPCS'} · {row.confidence}"
                   for i, row in enumerate(out.itertuples())]
-        pick = st.selectbox("Result", range(len(labels)), format_func=lambda i: labels[i])
+        pick = st.selectbox("Result", range(len(labels)), format_func=lambda i: labels[i],
+                            label_visibility="collapsed")
         render_group(groups[pick])
 
 
@@ -359,6 +519,9 @@ size or billing units don't add up.
   and JW waste should be less than one vial.
 - *Price* (when amounts are given): implied price per HCPCS unit vs the ASP payment limit, and per NDC
   unit vs NADAC, within ±{band}%. Billed charges get a markup test instead.
+- *Unit of measure* (when given): EA / ML / GM that matches the product's NCPDP unit hints at NDC units;
+  ME (mg) or F2 (IU) hints at HCPCS units when the HCPCS descriptor is exactly 1 mg or 1 unit. It is
+  weaker evidence than structure or price, because billing systems often fill it in by default.
 
 **5. Confidence**: **High** when structure and price agree inside the band; **Medium** when only one
 check is decisive or the price is near the edge of the band; **Low** when they conflict or for edge

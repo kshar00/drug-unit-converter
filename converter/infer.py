@@ -139,10 +139,19 @@ def structural_readings(
 
 
 def decide(
-    quantity: float, est: FactorEstimate, settings: Settings = DEFAULT_SETTINGS, waste: float | None = None
+    quantity: float,
+    est: FactorEstimate,
+    settings: Settings = DEFAULT_SETTINGS,
+    waste: float | None = None,
+    uom_hint: str | None = None,
 ) -> StructuralDecision:
+    """uom_hint ("NDC" / "HCPCS", from converter.uom) adds +1 to that reading: weaker than a +2 check,
+    so it breaks ties but can't overturn a structural preference."""
     readings = structural_readings(quantity, est, settings, waste)
     ndc, hc = readings["NDC"], readings["HCPCS"]
+    if uom_hint in readings and readings[uom_hint].feasible:
+        readings[uom_hint].score += 1
+        readings[uom_hint].passed.append("matches the claim's unit of measure")
 
     if abs(est.factor - 1) < 1e-9:  # type: ignore[operator]
         return StructuralDecision(
