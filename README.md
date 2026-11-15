@@ -1,5 +1,7 @@
 # Drug Unit Converter
 
+**[Try it live](https://drug-unit-converter-y6ndtar6xappvsf3wy2he4t.streamlit.app/)** (free hosting: if the app has been asleep, it takes a moment to wake up)
+
 Takes a drug claim line whose quantity unit basis is unknown and returns the NDC (NCPDP) unit
 equivalent, the HCPCS billing unit equivalent, which one the quantity most likely was, and a
 confidence level with reasons. Built only on public data (FDA NDC Directory, CMS ASP NDC-HCPCS
