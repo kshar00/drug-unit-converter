@@ -1,7 +1,12 @@
 """Daily added test cases: one new behaviour check per day, synthetic data only."""
 
 import pandas as pd
+import pytest
 
+from converter.convert import ClaimLine
+from converter.crosswalk import FactorEstimate
+from converter.financial import financial_check
+from converter.infer import Settings, decide
 from converter.report import lines_from_dataframe
 from converter.uom import uom_hint
 
@@ -39,3 +44,38 @@ def test_pharmacy_csv_headers_map_and_duplicate_aliases_keep_first_column():
     assert str(line.date_of_service) == "2026-11-03"
     assert (line.ingredient_cost, line.fee) == (1234.5, 10.0)
     assert line.modifiers == ("JW", "JZ")
+
+
+def test_billed_charge_one_sided_band_edges_markup_ceiling_and_fee_strip():
+    """Billed charges fit between 0.75x and 5x ASP after the fee is stripped; below 0.8x is near the edge."""
+    # 100 mg / 4 mL vial, 1 mg HCPCS unit: 25 HCPCS units per mL; ASP $10.00 per unit
+    vial = FactorEstimate(
+        hcpcs="J9999", short_description=None, hcpcs_dosage="1 MG", drug_name=None, ndc_unit="ML", factor=25,
+        ndc_units_per_item=4, ndc_units_per_package=4, hcpcs_units_per_package=100, factor_source="cms",
+    )
+    asp = {"payment_limit": 10.0}
+    settings = Settings()
+
+    def billed(ratio, fee=50.0):
+        # 100 HCPCS units (4 mL): net billed = ratio x ASP x 100, plus a fee that must be stripped first
+        line = ClaimLine(ndc="00000000000", quantity=100, billed_amount=ratio * 1000 + fee, fee=fee)
+        d = decide(100, vial, settings)
+        return financial_check(line, d.readings, "ML", asp, None, settings)
+
+    below = billed(0.70)  # under the 0.75x floor: neither reading fits
+    assert below.one_sided and below.fee_stripped == 50.0
+    assert below.amount == pytest.approx(700.0)
+    assert below.verdict == "NEITHER"
+
+    edge = billed(0.78)  # just above the floor but under 0.8x: fits, flagged near the edge
+    assert edge.verdict == "HCPCS" and edge.near_edge
+
+    markup = billed(4.9)  # a heavy markup a symmetric band would reject still fits, not near the edge
+    assert markup.verdict == "HCPCS" and not markup.near_edge
+    assert markup.comparisons[0].variance["HCPCS"] == pytest.approx(3.9)
+
+    assert billed(5.5).verdict == "NEITHER"  # over the 5x markup ceiling
+    # a looser band lowers the floor: 0.70x now fits under +/-35%
+    line = ClaimLine(ndc="00000000000", quantity=100, billed_amount=750.0, fee=50.0)
+    loose = Settings(tolerance_band=0.35)
+    assert financial_check(line, decide(100, vial, loose).readings, "ML", asp, None, loose).verdict == "HCPCS"
