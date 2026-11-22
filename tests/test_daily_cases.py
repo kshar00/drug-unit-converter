@@ -79,3 +79,44 @@ def test_billed_charge_one_sided_band_edges_markup_ceiling_and_fee_strip():
     line = ClaimLine(ndc="00000000000", quantity=100, billed_amount=750.0, fee=50.0)
     loose = Settings(tolerance_band=0.35)
     assert financial_check(line, decide(100, vial, loose).readings, "ML", asp, None, loose).verdict == "HCPCS"
+
+
+def test_two_jw_waste_lines_sum_into_total_but_penalise_as_possible_duplicate(tmp_path):
+    """Two JW lines on one claim still roll up with the administered line, but drop one level as a possible duplicate."""
+    from datetime import date
+
+    from converter.aggregate import convert_lines
+    from tests.store_builder import asp, build_store, product, xw
+
+    bev = "50242-0060-01"  # 100 mg / 4 mL single-dose vial, J9035 per 10 mg: 2.5 HCPCS units per mL
+    store = build_store(
+        tmp_path,
+        [product(bev, "1 VIAL, SINGLE-DOSE in 1 CARTON (50242-060-01)  / 4 mL in 1 VIAL, SINGLE-DOSE",
+                 name="Bevtest", strength="25", strength_unit="mg/mL")],
+        [xw(bev, "J9035", "10 MG", 4, 1, 10, 10, "Bevtest")],
+        [asp("J9035", 75.49, "10 MG")],
+    )
+    try:
+        def line(q, mods=(), amount=None, n=None):
+            return ClaimLine(ndc=bev, quantity=q, hcpcs="J9035", modifiers=tuple(mods), allowed_amount=amount,
+                             date_of_service=date(2026, 11, 5), claim_id="SYN-DUPJW", line_no=n)
+
+        # 35 administered + 2 JW + 3 JW = 40 HCPCS units = 16 mL = 4 whole vials (0.5 vial wasted); allowed matches ASP
+        clean = [line(35, amount=2642.15, n=1), line(5, ["JW"], 377.45, 2)]
+        dup = [line(35, amount=2642.15, n=1), line(2, ["JW"], 150.98, 2), line(3, ["JW"], 226.47, 3)]
+        (g_clean,) = convert_lines(clean, store)
+        (g_dup,) = convert_lines(dup, store)
+    finally:
+        store.close()
+
+    r = g_dup.result
+    assert g_dup.aggregated and r.line.quantity == 40 and r.line.line_no == "1,2,3"
+    assert r.line.allowed_amount == pytest.approx(3019.60)
+    assert (r.inferred_basis, r.hcpcs_units, r.ndc_units) == ("HCPCS", 40, 16)
+    issues = {i.code: i.severity for i in r.issues}
+    assert issues["duplicate_waste"] == "penalty"
+    assert "duplicate_lines" not in issues  # only one administered line
+    # same totals in a single JW line score High; the duplicate costs exactly one level
+    assert g_clean.result.confidence == "High" and r.confidence == "Medium"
+    assert [(s.role, s.hcpcs_units, s.ndc_units) for s in g_dup.lines] == [
+        ("administered", 35, 14), ("waste", 2, 0.8), ("waste", 3, 1.2)]
