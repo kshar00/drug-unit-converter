@@ -120,3 +120,28 @@ def test_two_jw_waste_lines_sum_into_total_but_penalise_as_possible_duplicate(tm
     assert g_clean.result.confidence == "High" and r.confidence == "Medium"
     assert [(s.role, s.hcpcs_units, s.ndc_units) for s in g_dup.lines] == [
         ("administered", 35, 14), ("waste", 2, 0.8), ("waste", 3, 1.2)]
+
+
+def test_ten_digit_ndc_matching_two_real_products_stays_unresolved_and_low(tmp_path):
+    """An unhyphenated 10-digit NDC whose 4-4-2 and 5-3-2 readings both exist is not guessed: no NDC, Low."""
+    from converter.convert import convert_line
+    from tests.store_builder import build_store, product, xw
+
+    vial = "1 VIAL, SINGLE-DOSE in 1 CARTON / 10 mL in 1 VIAL, SINGLE-DOSE"
+    ref = build_store(
+        tmp_path,
+        [product("1234-5678-90", vial, name="Alphamab"), product("12345-678-90", vial, name="Betamab")],
+        [xw("1234-5678-90", "J1111", "10 MG", 10, 1, 10, 10), xw("12345-678-90", "J2222", "10 MG", 10, 1, 10, 10)],
+    )
+    resolved = ref.resolve("1234567890")
+    assert resolved.ndc11 is None and resolved.found_in == []
+    assert "several candidates exist: 01234567890, 12345067890" in resolved.reason
+
+    # the same digits with hyphens are unambiguous and pick one product
+    assert ref.resolve("12345-678-90").ndc11 == "12345067890"
+
+    res = convert_line(ClaimLine(ndc="1234567890", quantity=10), ref)
+    assert res.ndc11 is None and res.ndc_units is None and res.hcpcs_units is None
+    assert res.confidence == "Low"
+    assert any("several candidates exist" in r for r in res.reasons)
+    assert any("ambiguous" in r for r in res.reasons)
