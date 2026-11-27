@@ -145,3 +145,44 @@ def test_ten_digit_ndc_matching_two_real_products_stays_unresolved_and_low(tmp_p
     assert res.confidence == "Low"
     assert any("several candidates exist" in r for r in res.reasons)
     assert any("ambiguous" in r for r in res.reasons)
+
+
+def test_jw_waste_on_a_different_date_of_service_does_not_roll_up(tmp_path):
+    """JW waste billed on another DOS of the same claim is not added: it is waste-only (Low), and the day's line stands alone."""
+    from datetime import date
+
+    from converter.aggregate import convert_lines
+    from tests.store_builder import asp, build_store, product, xw
+
+    bev = "50242-0060-01"  # 100 mg / 4 mL single-dose vial, J9035 per 10 mg: 2.5 HCPCS units per mL
+    store = build_store(
+        tmp_path,
+        [product(bev, "1 VIAL, SINGLE-DOSE in 1 CARTON (50242-060-01)  / 4 mL in 1 VIAL, SINGLE-DOSE",
+                 name="Bevtest", strength="25", strength_unit="mg/mL")],
+        [xw(bev, "J9035", "10 MG", 4, 1, 10, 10, "Bevtest")],
+        [asp("J9035", 75.49, "10 MG")],
+    )
+    try:
+        def line(q, dos, mods=(), amount=None, n=None):
+            return ClaimLine(ndc=bev, quantity=q, hcpcs="J9035", modifiers=tuple(mods), allowed_amount=amount,
+                             date_of_service=dos, claim_id="SYN-DOSJW", line_no=n)
+
+        lines = [line(35, date(2026, 11, 5), amount=2642.15, n=1),
+                 line(5, date(2026, 11, 6), ["JW"], 377.45, 2)]
+        admin, waste = convert_lines(lines, store)
+    finally:
+        store.close()
+
+    assert admin.key[1] == date(2026, 11, 5) and waste.key[1] == date(2026, 11, 6)
+    assert not admin.aggregated and not waste.aggregated
+    # the administered day is converted on its own 35 units, not the 40-unit total
+    assert admin.result.line.quantity == 35
+    assert (admin.result.inferred_basis, admin.result.hcpcs_units, admin.result.ndc_units) == ("HCPCS", 35, 14)
+    admin_codes = {i.code for i in admin.result.issues}
+    assert "aggregated" not in admin_codes and "waste_only" not in admin_codes
+    # 14 mL = 3.5 single-dose vials with no JW/JZ on that day: Medicare modifier note
+    assert "waste_modifier_missing" in admin_codes
+    # the orphaned JW line is an edge case on its own
+    w = {i.code: i.severity for i in waste.result.issues}
+    assert w["waste_only"] == "edge" and waste.result.confidence == "Low"
+    assert [s.role for s in waste.lines] == ["waste"]
