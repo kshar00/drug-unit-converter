@@ -186,3 +186,38 @@ def test_jw_waste_on_a_different_date_of_service_does_not_roll_up(tmp_path):
     w = {i.code: i.severity for i in waste.result.issues}
     assert w["waste_only"] == "edge" and waste.result.confidence == "Low"
     assert [s.role for s in waste.lines] == ["waste"]
+
+
+def test_jw_line_that_also_carries_rt_counts_as_waste_not_a_second_rt_side(tmp_path):
+    """A JW+RT waste line takes the waste role (JW wins over laterality), so an RT line plus its RT waste is not a duplicate side."""
+    from datetime import date
+
+    from converter.aggregate import convert_lines, role
+    from tests.store_builder import asp, build_store, product, xw
+
+    bev = "50242-0060-01"  # 100 mg / 4 mL single-dose vial, J9035 per 10 mg: 2.5 HCPCS units per mL
+    store = build_store(
+        tmp_path,
+        [product(bev, "1 VIAL, SINGLE-DOSE in 1 CARTON (50242-060-01)  / 4 mL in 1 VIAL, SINGLE-DOSE",
+                 name="Bevtest", strength="25", strength_unit="mg/mL")],
+        [xw(bev, "J9035", "10 MG", 4, 1, 10, 10, "Bevtest")],
+        [asp("J9035", 75.49, "10 MG")],
+    )
+    try:
+        def line(q, mods, amount, n):
+            return ClaimLine(ndc=bev, quantity=q, hcpcs="J9035", modifiers=tuple(mods), allowed_amount=amount,
+                             date_of_service=date(2026, 11, 5), claim_id="SYN-RTJW", line_no=n)
+
+        admin, waste = line(35, ["RT"], 2642.15, 1), line(5, ["RT", "JW"], 377.45, 2)
+        assert (role(admin), role(waste)) == ("RT", "waste")
+        (g,) = convert_lines([admin, waste], store)
+    finally:
+        store.close()
+
+    r = g.result
+    assert g.aggregated and r.line.quantity == 40 and r.line.modifiers == ("RT", "JW")
+    assert (r.inferred_basis, r.hcpcs_units, r.ndc_units) == ("HCPCS", 40, 16)
+    codes = {i.code for i in r.issues}
+    assert "duplicate_side" not in codes and "waste_only" not in codes and "duplicate_waste" not in codes
+    assert r.confidence == "High"
+    assert [(s.role, s.hcpcs_units, s.ndc_units) for s in g.lines] == [("RT", 35, 14), ("waste", 5, 2)]
